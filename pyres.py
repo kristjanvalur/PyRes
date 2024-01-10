@@ -5,6 +5,7 @@ import ctypes.wintypes
 import sys
 import os
 import contextlib
+import argparse
 
 from ctypes import WINFUNCTYPE, cast
 from ctypes.wintypes import (
@@ -61,10 +62,6 @@ prototype = WINFUNCTYPE(LPVOID, HGLOBAL)
 LockResource = prototype(("LockResource", kernel32), ((1,),))
 
 
-def UnlockResource(hResData):
-    pass
-
-
 CloseHandle = ctypes.windll.kernel32.CloseHandle
 
 prototype = WINFUNCTYPE(HANDLE, LPCWSTR, BOOL)
@@ -91,7 +88,7 @@ def RESOURCE_PARM(v: LPVOID):
     # use in the callback
     if IS_INTRESOURCE(v):
         return int(v)
-    r = cast(v, LPCWSTR)
+    r = ctypes.wstring_at(v)
     if r.startswith("#"):
         return int(r[1:])
     return r
@@ -135,6 +132,16 @@ LOAD_LIBRARY_AS_IMAGE_RESOURCE = 0x20
 LOCAL_EN_US = 1033
 
 
+def FormatError(extra=""):
+    if extra:
+        return f"{extra}: {ctypes.FormatError()}"
+    return ctypes.FormatError()
+
+
+def WinError(extra=""):
+    return ctypes.WinError(descr=FormatError(extra))
+
+
 # useful context managers
 
 
@@ -148,7 +155,7 @@ def load_library(filename):
         | LOAD_LIBRARY_AS_IMAGE_RESOURCE,
     )
     if not module:
-        raise ctypes.WinError(descr=filename)
+        raise WinError(filename)
     try:
         yield module
     finally:
@@ -171,34 +178,46 @@ def load_resource(hModule, hResource):
 def update_resource(filename):
     update_handle = BeginUpdateResource(filename, False)
     if not update_handle:
-        raise ctypes.WinError(descr="BeginUpdateResource")
+        raise WinError("BeginUpdateResource")
     try:
         yield update_handle
     finally:
         ret = EndUpdateResource(update_handle, False)
         if not ret:
-            raise ctypes.WinError(descr="EndUpdateResource")
+            raise WinError("EndUpdateResource")
 
 
 class ResourceEditor(object):
-    def __init__(self, filename):
+    def __init__(self, filename, args):
         self.filename = filename
+        self.args = args
 
     def update_resources(self, resources):
         language = LOCAL_EN_US
         with update_resource(self.filename) as update_handle:
             for type, name, data in resources:
                 # print(type, name, language, len(data))
-                ret = UpdateResource(
-                    update_handle,
-                    MAKEINTRESOURCE(type),
-                    MAKEINTRESOURCE(name),
-                    language,
-                    data,
-                    len(data),
-                )
+                if data is not None:
+                    ret = UpdateResource(
+                        update_handle,
+                        RESOURCE_ARG(type),
+                        RESOURCE_ARG(name),
+                        language,
+                        data,
+                        len(data),
+                    )
+                else:
+                    # delete the resource
+                    ret = UpdateResource(
+                        update_handle,
+                        RESOURCE_ARG(type),
+                        RESOURCE_ARG(name),
+                        language,
+                        None,
+                        0,
+                    )
                 if not ret:
-                    raise ctypes.WinError(descr="UpdateResource")
+                    raise WinError("UpdateResource")
 
                 # print("update: %s" % ret)
         return True
@@ -209,28 +228,32 @@ class ResourceEditor(object):
         manifests = []
 
         def callback(hModule, lpType, lpName, lParam):
-            lpType = RESOURCE_PARM(lpType)
-            lpName = RESOURCE_PARM(lpName)
-            # print(f"cb {hModule}, {lpType}, {lpName}, {lParam}")
-            hResource = FindResource(
-                hModule, RESOURCE_ARG(lpName), RESOURCE_ARG(lpType)
-            )
-            if not hResource:
-                print(ctypes.FormatError())
-                return False
-            # print self.get_resource_string(hResource)
-            size = SizeofResource(hModule, hResource)
-            if not size:
-                print(ctypes.FormatError())
-                return False
-            with load_resource(hModule, hResource) as hData:
-                ptr = LockResource(hData)
-                if not ptr:
+            try:
+                lpType = RESOURCE_PARM(lpType)
+                lpName = RESOURCE_PARM(lpName)
+                # print(f"cb {hModule}, {lpType}, {lpName}, {lParam}")
+                hResource = FindResource(
+                    hModule, RESOURCE_ARG(lpName), RESOURCE_ARG(lpType)
+                )
+                if not hResource:
                     print(ctypes.FormatError())
                     return False
-                manifests.append((lpType, lpName, ctypes.string_at(ptr, size)))
+                # print self.get_resource_string(hResource)
+                size = SizeofResource(hModule, hResource)
+                if not size:
+                    print(ctypes.FormatError())
+                    return False
+                with load_resource(hModule, hResource) as hData:
+                    ptr = LockResource(hData)
+                    if not ptr:
+                        print(ctypes.FormatError())
+                        return False
+                    manifests.append((lpType, lpName, ctypes.string_at(ptr, size)))
 
-            return True
+                return True
+            except Exception as e:
+                print(e)
+                return False
 
         with load_library(self.filename) as module:
             for resource_type in resource_types:
@@ -241,40 +264,94 @@ class ResourceEditor(object):
                     None,
                 )
                 if not v:
-                    raise ctypes.WinError(descr="EnumResourceNames")
+                    raise WinError("EnumResourceNames")
 
         repr = [(m[0], m[1], f"{len(m[2])} bytes") for m in manifests]
-        print(f"manifests: {repr}")
+        if self.args.verbose:
+            print(f"manifests: {repr}")
         return manifests
 
 
-def clone_file(source, dest):
-    re_from = ResourceEditor(source)
-    re_to = ResourceEditor(dest)
+def resource_types(args):
+    types = [RT_GROUP_ICON, RT_ICON]
+    if args.copy_version:
+        types.append(RT_VERSION)
+    return types
 
-    resources = []
 
-    resources += re_from.get_resources([RT_GROUP_ICON, RT_ICON, RT_VERSION])
+def clone_file(source, dest, args):
+    re_src = ResourceEditor(source, args)
+    re_dst = ResourceEditor(dest, args)
 
-    # add the contents of the source file to resource RT_RCDATA 1
-    # resources += [(RT_RCDATA, 1, open(source, "rb").read())]
+    types = resource_types(args)
+    src_resources = re_src.get_resources(types)
+    dst_resources = re_dst.get_resources(types)
+    wrt_resources = src_resources[:]
 
-    return re_to.update_resources(resources)
+    # find any extra resources ICON_GROUP resources in the destination
+    src_res = {m[:2] for m in src_resources}
+    dst_res = {m[:2] for m in dst_resources}
+    extra_res = dst_res - src_res
+    if extra_res:
+        if args.verbose:
+            print(f"extra resources in destination: {extra_res}")
+        if args.remove_extra:
+            for res in extra_res:
+                for e in dst_resources:
+                    if e[:2] == res:
+                        e = list(e)
+                        e[2] = None
+                        wrt_resources.append(tuple(e))
+
+    if not args.dry_run:
+        return re_dst.update_resources(wrt_resources)
+    else:
+        print("dry run")
+        print("would update with:")
+        for resource in wrt_resources:
+            print(format_resource_tuple(resource))
+
+
+def format_resource_tuple(resource):
+    data = "None" if resource[2] is None else f"{len(resource[2])} bytes"
+    return f"{resource[0]}, {resource[1]}, {data}"
+
+
+def describe_file(source, args):
+    re_from = ResourceEditor(source, args)
+
+    resources = re_from.get_resources(resource_types(args))
+    repr = [(m[0], m[1], f"{len(m[2])} bytes") for m in resources]
+    print(repr)
 
 
 def main():
-    if len(sys.argv) < 3:
-        print("This utility clones the RT_GROUP_ICON, RT_ICON and RT_VERSION")
-        print("resource types of two executables.")
-        print("Usage: %s <source> <dest>" % os.path.basename(sys.argv[0]))
-        return 1
+    description = """This utility clones the RT_GROUP_ICON, RT_ICON and RT_VERSION
+resource types of two executables."""
+    parser = argparse.ArgumentParser(description=description)
+    parser.add_argument("source", help="source file")
+    parser.add_argument("dest", nargs="?", default="", help="destination file")
+    parser.add_argument("-v", "--verbose", action="store_true", help="verbose")
+    parser.add_argument("--dry-run", action="store_true", help="dry run")
+    parser.add_argument(
+        "--remove-extra",
+        action="store_true",
+        help="remove extra resources from destination",
+    )
+    parser.add_argument(
+        "--copy-version", action="store_true", help="include version resource"
+    )
+    args = parser.parse_args()
 
-    if clone_file(sys.argv[1], sys.argv[2]):
-        print("Success!")
+    if args.dest:
+        clone_file(args.source, args.dest, args)
+        if args.verbose:
+            print("Success!")
         return 0
+
     else:
-        print("Error.")
-        return 2
+        describe_file(args.source, args)
+        return 0
 
 
 if __name__ == "__main__":
