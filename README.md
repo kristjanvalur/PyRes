@@ -4,7 +4,7 @@ pyres currently acts as a command line utility which clones the RT_GROUP_ICON, R
 
 The goal of the project is to develop more capabilities for the module, such as adding/replacing icons and a set/get interface for resource strings.
 
-The module currently supports only the English locale.
+The module currently supports only the English locale and requires Python3
 
 Example code:
 
