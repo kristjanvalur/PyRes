@@ -182,8 +182,7 @@ def load_library(filename):
 def load_resource(hModule, hResource):
     hData = LoadResource(hModule, hResource)
     if not hData:
-        print(ctypes.FormatError())
-        return False
+        raise WinError("LoadResource")
     try:
         yield hData
     finally:
@@ -204,6 +203,28 @@ def update_resource(filename):
 
 
 # useful utility functions
+
+
+def load_resource_data(hModule, lpType, lpName, wLanguage=None):
+    if wLanguage is None:
+        hResource = FindResource(hModule, RESOURCE_ARG(lpName), RESOURCE_ARG(lpType))
+    else:
+        hResource = FindResourceEx(
+            hModule,
+            RESOURCE_ARG(lpType),
+            RESOURCE_ARG(lpName),
+            wLanguage,
+        )
+    if not hResource:
+        raise WinError("FindResource")
+    size = SizeofResource(hModule, hResource)
+    if not size:
+        raise WinError("SizeofResource")
+    with load_resource(hModule, hResource) as hData:
+        ptr = LockResource(hData)
+        if not ptr:
+            raise WinError("LockResource")
+        return ctypes.string_at(ptr, size)
 
 
 def enum_resource_names(hModule, lpType):
@@ -311,36 +332,13 @@ class ResourceEditor(object):
                 # print("update: %s" % ret)
         return True
 
-    def load_resource(self, hModule, lpType, lpName, wLanguage=None):
-        if wLanguage is None:
-            hResource = FindResource(
-                hModule, RESOURCE_ARG(lpName), RESOURCE_ARG(lpType)
-            )
-        else:
-            hResource = FindResourceEx(
-                hModule,
-                RESOURCE_ARG(lpType),
-                RESOURCE_ARG(lpName),
-                wLanguage,
-            )
-        if not hResource:
-            raise WinError("FindResource")
-        size = SizeofResource(hModule, hResource)
-        if not size:
-            raise WinError("SizeofResource")
-        with load_resource(hModule, hResource) as hData:
-            ptr = LockResource(hData)
-            if not ptr:
-                raise WinError("LockResource")
-            return ctypes.string_at(ptr, size)
-
     def get_resources(self, resource_types):
         """Retrieves the manifest(s) embedded in the current executable"""
 
         with load_library(self.filename) as module:
             manifests = {}
             for res_type, res_name, res_lang in enum_all(module, resource_types):
-                v = self.load_resource(module, res_type, res_name, res_lang)
+                v = load_resource_data(module, res_type, res_name, res_lang)
                 manifests[(res_type, res_name, res_lang)] = v
             return manifests
 
