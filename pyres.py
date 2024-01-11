@@ -358,8 +358,9 @@ def clone_file(source, dest, args):
     src_resources = re_src.get_resources(types)
     dst_resources = re_dst.get_resources(types)
     if args.verbose:
-        print_resource_dict(src_resources, "source")
-        print_resource_dict(dst_resources, "destination")
+        print(f"Cloning resources {types} from {source!r} to {dest!r}")
+        print_resource_dict(src_resources, f"source {source!r}")
+        print_resource_dict(dst_resources, f"destination {dest!r}")
 
     wrt_resources = src_resources.copy()
 
@@ -389,10 +390,14 @@ def clone_file(source, dest, args):
             wrt_resources[res] = None
 
     if not args.dry_run:
+        if args.verbose:
+            print_resource_dict(wrt_resources, f"Updating with {dest!r} with")
         return re_dst.update_resources(wrt_resources)
     else:
-        print("dry run")
-        print_resource_dict(wrt_resources, "would update with")
+        if args.verbose:
+            print_resource_dict(
+                wrt_resources, f"Dry-run. Would update with {dest!r} with"
+            )
 
 
 def format_resource_dict(r):
