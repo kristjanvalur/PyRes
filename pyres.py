@@ -203,6 +203,80 @@ def update_resource(filename):
             raise WinError("EndUpdateResource")
 
 
+# useful utility functions
+
+
+def enum_resource_names(hModule, lpType):
+    types = []
+    cb_error = None
+
+    def callback(hModule, lpType, lpName, lParam):
+        try:
+            lpType = RESOURCE_PARM(lpType)
+            lpName = RESOURCE_PARM(lpName)
+            types.append(lpName)
+            return True
+        except Exception as e:
+            nonlocal cb_error
+            cb_error = e
+            return False
+
+    v = EnumResourceNames(
+        hModule,
+        RESOURCE_ARG(lpType),
+        EnumResourceNameCallback(callback),
+        None,
+    )
+    if cb_error:
+        raise cb_error
+    if not v:
+        raise WinError("EnumResourceNames")
+
+    return types
+
+
+def enum_resource_languages(hModule, lpType, lpName):
+    languages = []
+    cb_error = None
+
+    def callback(hModule, lpType, lpName, wLanguage, _):
+        try:
+            languages.append(wLanguage)
+            return True
+        except Exception as e:
+            nonlocal cb_error
+            cb_error = e
+            return False
+
+    v = EnumResourceLanguagesEx(
+        hModule,
+        RESOURCE_ARG(lpType),
+        RESOURCE_ARG(lpName),
+        ENUMRESLANGPROC(callback),
+        None,
+        RESOURCE_ENUM_LN,
+        0,
+    )
+    if cb_error:
+        raise cb_error
+    if not v:
+        raise WinError("EnumResourceLanguages")
+
+    return languages
+
+
+def enum_names_and_languages(hModule, lpType):
+    for name in enum_resource_names(hModule, lpType):
+        for lang in enum_resource_languages(hModule, lpType, name):
+            yield (name, lang)
+
+
+def enum_all(hModule, types=[]):
+    for t in types:
+        for name, lang in enum_names_and_languages(hModule, t):
+            yield (t, name, lang)
+
+
 class ResourceEditor(object):
     def __init__(self, filename, args):
         self.filename = filename
@@ -237,73 +311,6 @@ class ResourceEditor(object):
                 # print("update: %s" % ret)
         return True
 
-    def enum_resource_names(self, hModule, lpType=0):
-        types = []
-        cb_error = None
-
-        def callback(hModule, lpType, lpName, lParam):
-            try:
-                lpType = RESOURCE_PARM(lpType)
-                lpName = RESOURCE_PARM(lpName)
-                types.append(lpName)
-                return True
-            except Exception as e:
-                nonlocal cb_error
-                cb_error = e
-                return False
-
-        v = EnumResourceNames(
-            hModule,
-            RESOURCE_ARG(lpType),
-            EnumResourceNameCallback(callback),
-            None,
-        )
-        if cb_error:
-            raise cb_error
-        if not v:
-            raise WinError("EnumResourceNames")
-
-        return types
-
-    def enum_resource_languages(self, hModule, lpType, lpName):
-        languages = []
-        cb_error = None
-
-        def callback(hModule, lpType, lpName, wLanguage, _):
-            try:
-                languages.append(wLanguage)
-                return True
-            except Exception as e:
-                nonlocal cb_error
-                cb_error = e
-                return False
-
-        v = EnumResourceLanguagesEx(
-            hModule,
-            RESOURCE_ARG(lpType),
-            RESOURCE_ARG(lpName),
-            ENUMRESLANGPROC(callback),
-            None,
-            RESOURCE_ENUM_LN,
-            0,
-        )
-        if cb_error:
-            raise cb_error
-        if not v:
-            raise WinError("EnumResourceLanguages")
-
-        return languages
-
-    def enum_names_and_languages(self, hModule, lpType=0):
-        for name in self.enum_resource_names(hModule, lpType):
-            for lang in self.enum_resource_languages(hModule, lpType, name):
-                yield (name, lang)
-
-    def enum_all(self, hModule, types=[]):
-        for t in types:
-            for name, lang in self.enum_names_and_languages(hModule, t):
-                yield (t, name, lang)
-
     def load_resource(self, hModule, lpType, lpName, wLanguage=None):
         if wLanguage is None:
             hResource = FindResource(
@@ -332,7 +339,7 @@ class ResourceEditor(object):
 
         with load_library(self.filename) as module:
             manifests = {}
-            for res_type, res_name, res_lang in self.enum_all(module, resource_types):
+            for res_type, res_name, res_lang in enum_all(module, resource_types):
                 v = self.load_resource(module, res_type, res_name, res_lang)
                 manifests[(res_type, res_name, res_lang)] = v
             return manifests
