@@ -1,12 +1,12 @@
 pyres is a simple Python tool and module for copying resources in windows executables.
 
-pyres currently acts as a command line utility which clones the RT_GROUP_ICON, RT_ICON and optionally RT_VERSION resource types betweeb executables.
+pyres currently acts as a command line utility which clones the RT_GROUP_ICON, RT_ICON and optionally RT_VERSION resource types between executables.
 
 The goal of the project is to develop more capabilities for the module, such as adding/replacing icons and a set/get interface for resource strings.
 
 Example run:
 ```
-py pyres.py from.exe to.exe --verbose --remove-extra
+> py pyres.py from.exe to.exe --verbose --remove-extra
 
 Cloning resources [14, 3] from 'from.exe' to 'to.exe'
 source:
