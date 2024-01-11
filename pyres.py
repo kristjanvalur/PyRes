@@ -3,7 +3,6 @@
 import ctypes
 import ctypes.wintypes
 import sys
-import os
 import contextlib
 import argparse
 
@@ -18,6 +17,7 @@ from ctypes.wintypes import (
     BOOL,
     HRSRC,
     HGLOBAL,
+    LANGID,
 )
 
 
@@ -31,6 +31,13 @@ LoadLibraryEx = prototype(("LoadLibraryExW", kernel32), ((1,), (1,), (1,)))
 prototype = WINFUNCTYPE(BOOL, HMODULE)
 FreeLibrary = prototype(("FreeLibrary", kernel32), ((1,),))
 
+ENUMRESLANGPROC = ctypes.WINFUNCTYPE(BOOL, HMODULE, LPVOID, LPVOID, WORD, LPVOID)
+prototype = WINFUNCTYPE(
+    BOOL, HMODULE, LPCWSTR, LPCWSTR, ENUMRESLANGPROC, LPVOID, DWORD, LANGID
+)
+EnumResourceLanguagesEx = prototype(
+    ("EnumResourceLanguagesExW", kernel32), ((1,), (1,), (1,), (1,), (1,), (1,), (1,))
+)
 
 EnumResourceNameCallback = ctypes.WINFUNCTYPE(
     BOOL,
@@ -48,6 +55,9 @@ EnumResourceNames = prototype(
 
 prototype = WINFUNCTYPE(HRSRC, HMODULE, LPCWSTR, LPCWSTR)
 FindResource = prototype(("FindResourceW", kernel32), ((1,), (1,), (1,)))
+
+prototype = WINFUNCTYPE(HRSRC, HMODULE, LPCWSTR, LPCWSTR, WORD)
+FindResourceEx = prototype(("FindResourceExW", kernel32), ((1,), (1,), (1,), (1,)))
 
 prototype = WINFUNCTYPE(DWORD, HMODULE, HRSRC)
 SizeofResource = prototype(("SizeofResource", kernel32), ((1,), (1,)))
@@ -131,6 +141,12 @@ LOAD_LIBRARY_AS_IMAGE_RESOURCE = 0x20
 # locales
 LOCAL_EN_US = 1033
 
+# resource enum
+RESOURCE_ENUM_MUI = 0x0002
+RESOURCE_ENUM_LN = 0x0001
+RESOURCE_ENUM_MUI_SYSTEM = 0x0004
+RESOURCE_ENUM_VALIDATE = 0x0008
+
 
 def FormatError(extra=""):
     if extra:
@@ -193,9 +209,8 @@ class ResourceEditor(object):
         self.args = args
 
     def update_resources(self, resources):
-        language = LOCAL_EN_US
         with update_resource(self.filename) as update_handle:
-            for (type, name), data in resources.items():
+            for (type, name, language), data in resources.items():
                 # print(type, name, language, len(data))
                 if data is not None:
                     ret = UpdateResource(
@@ -222,56 +237,105 @@ class ResourceEditor(object):
                 # print("update: %s" % ret)
         return True
 
-    def get_resources(self, resource_types):
-        """Retrieves the manifest(s) embedded in the current executable"""
-
-        manifests = {}
+    def enum_resource_names(self, hModule, lpType=0):
+        types = []
         cb_error = None
 
         def callback(hModule, lpType, lpName, lParam):
             try:
                 lpType = RESOURCE_PARM(lpType)
                 lpName = RESOURCE_PARM(lpName)
-                # print(f"cb {hModule}, {lpType}, {lpName}, {lParam}")
-                hResource = FindResource(
-                    hModule, RESOURCE_ARG(lpName), RESOURCE_ARG(lpType)
-                )
-                if not hResource:
-                    print(ctypes.FormatError())
-                    return False
-                # print self.get_resource_string(hResource)
-                size = SizeofResource(hModule, hResource)
-                if not size:
-                    print(ctypes.FormatError())
-                    return False
-                with load_resource(hModule, hResource) as hData:
-                    ptr = LockResource(hData)
-                    if not ptr:
-                        print(ctypes.FormatError())
-                        return False
-                    key = (lpType, lpName)
-                    manifests[key] = ctypes.string_at(ptr, size)
-
+                types.append(lpName)
                 return True
             except Exception as e:
                 nonlocal cb_error
                 cb_error = e
                 return False
 
-        with load_library(self.filename) as module:
-            for resource_type in resource_types:
-                v = EnumResourceNames(
-                    module,
-                    MAKEINTRESOURCE(resource_type),
-                    EnumResourceNameCallback(callback),
-                    None,
-                )
-                if cb_error:
-                    raise cb_error
-                if not v:
-                    raise WinError("EnumResourceNames")
+        v = EnumResourceNames(
+            hModule,
+            RESOURCE_ARG(lpType),
+            EnumResourceNameCallback(callback),
+            None,
+        )
+        if cb_error:
+            raise cb_error
+        if not v:
+            raise WinError("EnumResourceNames")
 
-        return manifests
+        return types
+
+    def enum_resource_languages(self, hModule, lpType, lpName):
+        languages = []
+        cb_error = None
+
+        def callback(hModule, lpType, lpName, wLanguage, _):
+            try:
+                languages.append(wLanguage)
+                return True
+            except Exception as e:
+                nonlocal cb_error
+                cb_error = e
+                return False
+
+        v = EnumResourceLanguagesEx(
+            hModule,
+            RESOURCE_ARG(lpType),
+            RESOURCE_ARG(lpName),
+            ENUMRESLANGPROC(callback),
+            None,
+            RESOURCE_ENUM_LN,
+            0,
+        )
+        if cb_error:
+            raise cb_error
+        if not v:
+            raise WinError("EnumResourceLanguages")
+
+        return languages
+
+    def enum_names_and_languages(self, hModule, lpType=0):
+        for name in self.enum_resource_names(hModule, lpType):
+            for lang in self.enum_resource_languages(hModule, lpType, name):
+                yield (name, lang)
+
+    def enum_all(self, hModule, types=[]):
+        for t in types:
+            for name, lang in self.enum_names_and_languages(hModule, t):
+                yield (t, name, lang)
+
+    def load_resource(self, hModule, lpType, lpName, wLanguage=None):
+        if wLanguage is None:
+            hResource = FindResource(
+                hModule, RESOURCE_ARG(lpName), RESOURCE_ARG(lpType)
+            )
+        else:
+            hResource = FindResourceEx(
+                hModule,
+                RESOURCE_ARG(lpType),
+                RESOURCE_ARG(lpName),
+                wLanguage,
+            )
+        if not hResource:
+            raise WinError("FindResource")
+        size = SizeofResource(hModule, hResource)
+        if not size:
+            raise WinError("SizeofResource")
+        with load_resource(hModule, hResource) as hData:
+            ptr = LockResource(hData)
+            if not ptr:
+                raise WinError("LockResource")
+            return ctypes.string_at(ptr, size)
+
+    def get_resources(self, resource_types):
+        """Retrieves the manifest(s) embedded in the current executable"""
+
+        with load_library(self.filename) as module:
+            manifests = {}
+            for res_type, res_name, res_lang in self.enum_all(module, resource_types):
+                v = self.load_resource(module, res_type, res_name, res_lang)
+                manifests[(res_type, res_name, res_lang)] = v
+            return manifests
 
 
 def resource_types(args):
@@ -301,8 +365,8 @@ def clone_file(source, dest, args):
     common_res = src_res & dst_res
 
     # ignore resources which are unchanged
+    identical = set()
     for c in common_res:
-        identical = set()
         if src_resources[c] == dst_resources[c]:
             identical.add(c)
             del wrt_resources[c]
