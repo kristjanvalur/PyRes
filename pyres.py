@@ -195,7 +195,7 @@ class ResourceEditor(object):
     def update_resources(self, resources):
         language = LOCAL_EN_US
         with update_resource(self.filename) as update_handle:
-            for type, name, data in resources:
+            for (type, name), data in resources.items():
                 # print(type, name, language, len(data))
                 if data is not None:
                     ret = UpdateResource(
@@ -225,7 +225,8 @@ class ResourceEditor(object):
     def get_resources(self, resource_types):
         """Retrieves the manifest(s) embedded in the current executable"""
 
-        manifests = []
+        manifests = {}
+        cb_error = None
 
         def callback(hModule, lpType, lpName, lParam):
             try:
@@ -248,11 +249,13 @@ class ResourceEditor(object):
                     if not ptr:
                         print(ctypes.FormatError())
                         return False
-                    manifests.append((lpType, lpName, ctypes.string_at(ptr, size)))
+                    key = (lpType, lpName)
+                    manifests[key] = ctypes.string_at(ptr, size)
 
                 return True
             except Exception as e:
-                print(e)
+                nonlocal cb_error
+                cb_error = e
                 return False
 
         with load_library(self.filename) as module:
@@ -263,18 +266,17 @@ class ResourceEditor(object):
                     EnumResourceNameCallback(callback),
                     None,
                 )
+                if cb_error:
+                    raise cb_error
                 if not v:
                     raise WinError("EnumResourceNames")
 
-        repr = [(m[0], m[1], f"{len(m[2])} bytes") for m in manifests]
-        if self.args.verbose:
-            print(f"manifests: {repr}")
         return manifests
 
 
 def resource_types(args):
     types = [RT_GROUP_ICON, RT_ICON]
-    if args.copy_version:
+    if args.include_version:
         types.append(RT_VERSION)
     return types
 
@@ -286,43 +288,63 @@ def clone_file(source, dest, args):
     types = resource_types(args)
     src_resources = re_src.get_resources(types)
     dst_resources = re_dst.get_resources(types)
-    wrt_resources = src_resources[:]
+    if args.verbose:
+        print_resource_dict(src_resources, "source")
+        print_resource_dict(dst_resources, "destination")
 
-    # find any extra resources ICON_GROUP resources in the destination
-    src_res = {m[:2] for m in src_resources}
-    dst_res = {m[:2] for m in dst_resources}
+    wrt_resources = src_resources.copy()
+
+    src_res = set(src_resources.keys())
+    dst_res = set(dst_resources.keys())
+
+    # find common resource keys in source and dest
+    common_res = src_res & dst_res
+
+    # ignore resources which are unchanged
+    for c in common_res:
+        identical = set()
+        if src_resources[c] == dst_resources[c]:
+            identical.add(c)
+            del wrt_resources[c]
+    if args.verbose:
+        print(f"identical resources in source and dest: {identical}")
+
+    # find any extra resource keys in the destination
     extra_res = dst_res - src_res
-    if extra_res:
-        if args.verbose:
-            print(f"extra resources in destination: {extra_res}")
-        if args.remove_extra:
-            for res in extra_res:
-                for e in dst_resources:
-                    if e[:2] == res:
-                        e = list(e)
-                        e[2] = None
-                        wrt_resources.append(tuple(e))
+    if args.verbose:
+        print(f"extra resources in destination: {extra_res}")
+
+    # remove extra resources in destination
+    if args.remove_extra:
+        for res in extra_res:
+            wrt_resources[res] = None
 
     if not args.dry_run:
         return re_dst.update_resources(wrt_resources)
     else:
         print("dry run")
-        print("would update with:")
-        for resource in wrt_resources:
-            print(format_resource_tuple(resource))
+        print_resource_dict(wrt_resources, "would update with")
 
 
-def format_resource_tuple(resource):
-    data = "None" if resource[2] is None else f"{len(resource[2])} bytes"
-    return f"{resource[0]}, {resource[1]}, {data}"
+def format_resource_dict(r):
+    res = {}
+    for k, v in r.items():
+        data = "None" if v is None else f"{repr(v[:20])}... ({len(v)} bytes)"
+        res[k] = data
+    return res
+
+
+def print_resource_dict(r, header="resources"):
+    print(f"{header}:")
+    for k, v in format_resource_dict(r).items():
+        print(f"{k}: {v}")
 
 
 def describe_file(source, args):
     re_from = ResourceEditor(source, args)
 
     resources = re_from.get_resources(resource_types(args))
-    repr = [(m[0], m[1], f"{len(m[2])} bytes") for m in resources]
-    print(repr)
+    print_resource_dict(resources)
 
 
 def main():
@@ -339,7 +361,7 @@ resource types of two executables."""
         help="remove extra resources from destination",
     )
     parser.add_argument(
-        "--copy-version", action="store_true", help="include version resource"
+        "--include-version", action="store_true", help="include version resource"
     )
     args = parser.parse_args()
 
